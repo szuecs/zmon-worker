@@ -1,6 +1,7 @@
 import opentracing
 import logging
 
+
 def init_opentracing_tracer(tracer, log_level=logging.WARN):
     if tracer == 'instana':
         import instana.options as instanaOpts  # noqa
