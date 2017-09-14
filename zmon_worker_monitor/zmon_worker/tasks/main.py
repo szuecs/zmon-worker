@@ -862,6 +862,7 @@ class MainTask(object):
             logger.error("Error in data service send: url={} ex={}".format(cls._dataservice_url, ex))
             raise
 
+    @trace()
     def check_and_notify(self, req, alerts, task_context=None):
         self.task_context = task_context
         start_time = time.time()
@@ -905,6 +906,7 @@ class MainTask(object):
         else:
             self.notify(val, req, alerts)
 
+    @trace()
     def trial_run(self, req, alerts, task_context=None):
         self.task_context = task_context
         start_time = time.time()
@@ -1057,6 +1059,7 @@ class MainTask(object):
                 'Result size ({}KB) exceeded the maximum size: {}KB'.format(
                     size, self.max_result_size))
 
+    @trace()
     def check(self, req):
 
         self.logger.debug(req)
@@ -1348,6 +1351,7 @@ class MainTask(object):
                 self.con.hset('zmon:notifications:{}:{}'.format(context['alert_def']['id'], context['entity']['id']),
                               notification, time.time() + repeat)
 
+    @trace()
     def notify(self, val, req, alerts, force_alert=False):
         '''
         Process check result and evaluate all alerts. Returns list of active alert IDs
