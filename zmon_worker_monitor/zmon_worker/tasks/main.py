@@ -5,6 +5,7 @@ import functools
 import itertools
 import json
 import logging
+from opentracing_utils import trace
 import random
 import re
 import requests
@@ -815,6 +816,7 @@ class MainTask(object):
             #     len(self._counter), time.time() - now)
 
     @classmethod
+    @trace()
     def send_to_dataservice(cls, check_results, timeout=10):
 
         headers = {'Content-Type': 'application/json', 'User-Agent': get_user_agent()}
