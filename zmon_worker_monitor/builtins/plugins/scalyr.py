@@ -39,14 +39,15 @@ class ScalyrWrapper(object):
     def count(self, query, minutes=5):
         return self.timeseries(query, function='count', minutes=minutes, buckets=1, prio='low')
 
-    def function(self, function, query, minutes=5):
+    def function(self, function, query, start_time='5m', end_time=None):
 
         val = {
             'token': self.read_key,
             'queryType': 'numeric',
             'filter': query,
             'function': function,
-            'startTime': str(minutes) + 'm',
+            'startTime': start_time,
+            'endTime': end_time,
             'priority': 'low',
             'buckets': 1
         }
