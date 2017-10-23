@@ -16,6 +16,7 @@ class ScalyrWrapperFactory(IFunctionFactoryPlugin):
 
     def configure(self, conf):
         self.read_key = conf.get('read.key', '')
+        self.scalyr_region = conf.get('scalyr.region', '')
         return
 
     def create(self, factory_ctx):
@@ -24,17 +25,22 @@ class ScalyrWrapperFactory(IFunctionFactoryPlugin):
         :param factory_ctx: (dict) names available for Function instantiation
         :return: an object that implements a check function
         """
-        return propartial(ScalyrWrapper, read_key=self.read_key)
+        return propartial(ScalyrWrapper, read_key=self.read_key, scalyr_region=self.scalyr_region)
 
 
 class ScalyrWrapper(object):
-    def __init__(self, read_key):
-        self.__numeric_url = 'https://www.scalyr.com/api/numericQuery'
-        self.__timeseries_url = 'https://www.scalyr.com/api/timeseriesQuery'
-        self.__facet_url = 'https://www.scalyr.com/api/facetQuery'
+    def __init__(self, read_key, scalyr_region=None):
+        if scalyr_region == 'eu':
+            self.__numeric_url = 'https://eu.scalyr.com/api/numericQuery'
+            self.__timeseries_url = 'https://eu.scalyr.com/api/timeseriesQuery'
+            self.__facet_url = 'https://eu.scalyr.com/api/facetQuery'
+        else:
+            self.__numeric_url = 'https://www.scalyr.com/api/numericQuery'
+            self.__timeseries_url = 'https://www.scalyr.com/api/timeseriesQuery'
+            self.__facet_url = 'https://www.scalyr.com/api/facetQuery'
         if not read_key:
             raise ConfigurationError('Scalyr read key is not set.')
-        self.read_key = read_key
+        self.__read_key = read_key
 
     def count(self, query, minutes=5):
         return self.timeseries(query, function='count', minutes=minutes, buckets=1, prio='low')
@@ -42,7 +48,7 @@ class ScalyrWrapper(object):
     def function(self, function, query, minutes=5):
 
         val = {
-            'token': self.read_key,
+            'token': self.__read_key,
             'queryType': 'numeric',
             'filter': query,
             'function': function,
@@ -64,7 +70,7 @@ class ScalyrWrapper(object):
     def facets(self, filter, field, max_count=5, minutes=30, prio='low'):
 
         val = {
-            'token': self.read_key,
+            'token': self.__read_key,
             'queryType': 'facet',
             'filter': filter,
             'field': field,
@@ -83,7 +89,7 @@ class ScalyrWrapper(object):
     def timeseries(self, filter, function='count', minutes=30, buckets=1, prio='low'):
 
         val = {
-            'token': self.read_key,
+            'token': self.__read_key,
             'queries': [
                 {
                     'filter': filter,
