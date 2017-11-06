@@ -9,6 +9,9 @@ from zmon_worker_monitor.adapters.ifunctionfactory_plugin import IFunctionFactor
 
 logger = logging.getLogger('zmon-worker.scalyr-function')
 
+SCALYR_URL_PREFIX_US = 'https://www.scalyr.com/api'
+SCALYR_URL_PREFIX_EU = 'https://eu.scalyr.com/api'
+
 
 class ScalyrWrapperFactory(IFunctionFactoryPlugin):
     def __init__(self):
@@ -30,14 +33,15 @@ class ScalyrWrapperFactory(IFunctionFactoryPlugin):
 
 class ScalyrWrapper(object):
     def __init__(self, read_key, scalyr_region=None):
+        scalyr_prefix = SCALYR_URL_PREFIX_US
+
         if scalyr_region == 'eu':
-            self.__numeric_url = 'https://eu.scalyr.com/api/numericQuery'
-            self.__timeseries_url = 'https://eu.scalyr.com/api/timeseriesQuery'
-            self.__facet_url = 'https://eu.scalyr.com/api/facetQuery'
-        else:
-            self.__numeric_url = 'https://www.scalyr.com/api/numericQuery'
-            self.__timeseries_url = 'https://www.scalyr.com/api/timeseriesQuery'
-            self.__facet_url = 'https://www.scalyr.com/api/facetQuery'
+            scalyr_prefix = SCALYR_URL_PREFIX_EU
+
+        self.__numeric_url = '{}/numericQuery'.format(scalyr_prefix)
+        self.__timeseries_url = '{}/timeseriesQuery'.format(scalyr_prefix)
+        self.__facet_url = '{}/facetQuery'.format(scalyr_prefix)
+
         if not read_key:
             raise ConfigurationError('Scalyr read key is not set.')
         self.__read_key = read_key
