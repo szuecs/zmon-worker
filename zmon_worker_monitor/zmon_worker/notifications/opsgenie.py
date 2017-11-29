@@ -21,7 +21,16 @@ logger = logging.getLogger(__name__)
 
 class NotifyOpsgenie(BaseNotification):
     @classmethod
-    def notify(cls, alert, teams=None, per_entity=False, include_alert=True, priority=None, message='', **kwargs):
+    def notify(cls,
+               alert,
+               teams=None,
+               per_entity=False,
+               include_alert=True,
+               priority=None,
+               message='',
+               description='',
+               **kwargs):
+
         url = 'https://api.opsgenie.com/v2/alerts'
 
         repeat = kwargs.get('repeat', 0)
@@ -80,6 +89,7 @@ class NotifyOpsgenie(BaseNotification):
                 'teams': teams,
                 'message': '[{}] - {}'.format(responsible_team, msg),  # TODO: remove when it is no longer needed!
                 'source': alert.get('worker', ''),
+                'description': description,
                 'entity': entity['id'],
                 'note': note,
                 'priority': priority,
@@ -114,7 +124,7 @@ class NotifyOpsgenie(BaseNotification):
             r.raise_for_status()
         except requests.HTTPError as e:
             logger.error('HTTP Error ({}) {}'.format(e.response.status_code, e.response.text))
-        except:
+        except Exception:
             logger.exception('Notifying Opsgenie failed')
 
         return repeat
