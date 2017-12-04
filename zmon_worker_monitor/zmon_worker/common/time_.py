@@ -19,10 +19,14 @@ TIMEZONE_OFFSET = re.compile(r'([+-])([0-9][0-9])(?::?([0-9][0-9]))?$')
 def parse_timedelta(s):
     '''
     >>> parse_timedelta('bla')
-
+    Traceback (most recent call last):
+    ...
+    ValueError: invalid literal for int() with base 10: 'bl'
 
     >>> parse_timedelta('1k')
-
+    Traceback (most recent call last):
+    ...
+    ValueError: invalid time unit: k
 
     >>> parse_timedelta('1s').total_seconds()
     1.0
@@ -42,21 +46,23 @@ def parse_timedelta(s):
         factor = -1
     else:
         factor = 1
-    try:
-        v = int(s[:-1])
-        u = s[-1]
-    except Exception:
-        return None
 
+    v = int(s[:-1])
+    u = s[-1]
+
+    if u not in TIME_UNITS:
+        raise ValueError('invalid time unit: {}'.format(u))
     arg = TIME_UNITS.get(u)
     if arg:
         return factor * timedelta(**{arg: v})
-    return None
 
 
 def parse_datetime(s):
     '''
     >>> parse_datetime('foobar')
+    Traceback (most recent call last):
+    ...
+    ValueError: invalid datetime foobar
 
     >>> parse_datetime('1983-10-12T23:30').isoformat(' ')
     '1983-10-12 23:30:00'
@@ -91,4 +97,4 @@ def parse_datetime(s):
             return datetime.strptime(s, fmt) - timezone_timedelta
         except Exception:
             pass
-    return None
+    raise ValueError('invalid datetime {}'.format(s))

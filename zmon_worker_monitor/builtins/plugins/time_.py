@@ -36,13 +36,18 @@ class TimeWrapper(object):
         if isinstance(spec, Number):
             self.time = datetime.utcfromtimestamp(spec) if utc else datetime.fromtimestamp(spec)
         else:
-            delta = parse_timedelta(spec)
-            if delta:
-                self.time = now + delta
-            elif spec == 'now':
+            if spec == 'now':
                 self.time = now
             else:
-                self.time = parse_datetime(spec)
+                delta = None
+                try:
+                    delta = parse_timedelta(spec)
+                except Exception:
+                    pass
+                if delta:
+                    self.time = now + delta
+                else:
+                    self.time = parse_datetime(spec)
 
     def __sub__(self, other):
         '''
