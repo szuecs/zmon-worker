@@ -2,7 +2,7 @@ import requests
 
 import pytest
 from mock import MagicMock
-from zmon_worker_monitor.builtins.plugins.http import HttpWrapper
+from zmon_worker_monitor.builtins.plugins.http import HttpWrapper, HttpFactory
 from zmon_worker_monitor.zmon_worker.errors import HttpError, CheckError, ConfigurationError
 from zmon_worker_monitor.zmon_worker.common.http import get_user_agent
 
@@ -382,3 +382,9 @@ def test_http_certs(monkeypatch, url, port, err):
         ssl_sock.connect.assert_called_with(('zmon', port))
 
         ssl_sock.close.assert_called()
+
+
+def test_basicauth_conf(monkeypatch):
+    fact = HttpFactory()
+    fact.configure({'http.basic_auth': 'user:pass'})
+    assert fact._basic_auth_users == {'user': 'pass'}

@@ -37,6 +37,7 @@ ZMON_FORMAT = '%Y-%m-%d %H:%M:%S'
 class HttpFactory(IFunctionFactoryPlugin):
     def __init__(self):
         super(HttpFactory, self).__init__()
+        self._basic_auth_users = {}
 
     def configure(self, conf):
         """
@@ -57,6 +58,10 @@ class HttpFactory(IFunctionFactoryPlugin):
         tokens.manage('uid', ['uid'])
 
         tokens.start()
+        for auth in conf.get('http.basic_auth', '').split():
+            if auth and ':' in auth:
+                (user, password) = auth.split(':', 1)
+                self._basic_auth_users.update({user: password})
 
     def create(self, factory_ctx):
         """
@@ -64,7 +69,7 @@ class HttpFactory(IFunctionFactoryPlugin):
         :param factory_ctx: (dict) names available for Function instantiation
         :return: an object that implements a check function
         """
-        return propartial(HttpWrapper, base_url=factory_ctx.get('entity_url'))
+        return propartial(HttpWrapper, basic_auth=self._basic_auth_users, base_url=factory_ctx.get('entity_url'))
 
 
 def absolute_http_url(url):
@@ -165,6 +170,8 @@ class HttpWrapper(object):
             oauth2=False,
             oauth2_token_name='uid',
             headers=None,
+            basic_auth=None,
+            user=None,
     ):
         if method.lower() not in ('get', 'head'):
             raise CheckError('Invalid method. Only GET and HEAD are supported!')
@@ -184,6 +191,8 @@ class HttpWrapper(object):
         self.oauth2 = oauth2
         self.oauth2_token_name = oauth2_token_name
         self.__method = method.lower()
+        self._basic_auth = basic_auth
+        self._user = user
 
         self.allow_redirects = True if allow_redirects is None else allow_redirects
         if self.__method == 'head' and allow_redirects is None:
@@ -209,6 +218,11 @@ class HttpWrapper(object):
                 base_url = base_url.replace("{0}:{1}@".format(url_parsed.username, url_parsed.password), "")
                 basic_auth = (url_parsed.username, url_parsed.password)
             self.clean_url = base_url
+
+            if self._user:
+                # no default for get, so the user gets notified by an exception that the selected
+                # username was not configured
+                basic_auth = (self._user, self._basic_auth.get(self._user))
 
             if self.oauth2:
                 self._headers.update({'Authorization': 'Bearer {}'.format(tokens.get(self.oauth2_token_name))})
