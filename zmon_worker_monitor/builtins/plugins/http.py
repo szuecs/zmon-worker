@@ -38,6 +38,7 @@ class HttpFactory(IFunctionFactoryPlugin):
     def __init__(self):
         super(HttpFactory, self).__init__()
         self._basic_auth_users = {}
+        self._extra_headers = {}
 
     def configure(self, conf):
         """
@@ -63,13 +64,16 @@ class HttpFactory(IFunctionFactoryPlugin):
                 (user, password) = auth.split(':', 1)
                 self._basic_auth_users.update({user: password})
 
+        self._extra_headers = json.loads(conf.get('http.extra_headers', '{}'))
+
     def create(self, factory_ctx):
         """
         Automatically called to create the check function's object
         :param factory_ctx: (dict) names available for Function instantiation
         :return: an object that implements a check function
         """
-        return propartial(HttpWrapper, basic_auth=self._basic_auth_users, base_url=factory_ctx.get('entity_url'))
+        return propartial(HttpWrapper, basic_auth=self._basic_auth_users,
+                          extra_headers_conf=self._extra_headers, base_url=factory_ctx.get('entity_url'))
 
 
 def absolute_http_url(url):
@@ -170,6 +174,8 @@ class HttpWrapper(object):
             oauth2=False,
             oauth2_token_name='uid',
             headers=None,
+            extra_headers_conf=None,
+            extra_headers=None,
             basic_auth=None,
             user=None,
     ):
@@ -193,6 +199,8 @@ class HttpWrapper(object):
         self.__method = method.lower()
         self._basic_auth = basic_auth
         self._user = user
+        self._extra_headers_conf = extra_headers_conf
+        self._extra_headers = extra_headers
 
         self.allow_redirects = True if allow_redirects is None else allow_redirects
         if self.__method == 'head' and allow_redirects is None:
@@ -228,6 +236,9 @@ class HttpWrapper(object):
                 self._headers.update({'Authorization': 'Bearer {}'.format(tokens.get(self.oauth2_token_name))})
 
             self._headers.update({'User-Agent': get_user_agent()})
+
+            if self._extra_headers and self._extra_headers in self._extra_headers_conf:
+                self._headers.update(self._extra_headers_conf.get(self._set_headers))
 
             try:
                 if post_data is None:

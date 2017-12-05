@@ -388,3 +388,9 @@ def test_basicauth_conf(monkeypatch):
     fact = HttpFactory()
     fact.configure({'http.basic_auth': 'user:pass'})
     assert fact._basic_auth_users == {'user': 'pass'}
+
+
+def test_extra_headers(monkeypatch):
+    fact = HttpFactory()
+    fact.configure({'http.extra_headers': '{"foo": {"X-MyFoo": "bar"}}'})
+    assert fact._extra_headers == {'foo': {'X-MyFoo': 'bar'}}
