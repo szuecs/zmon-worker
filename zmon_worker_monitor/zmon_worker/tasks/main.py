@@ -1399,14 +1399,22 @@ class MainTask(object):
 
         return is_alert, captures
 
+    def _notification_name(self, notification):
+        if '(' not in notification:
+            return notification
+        else:
+            return notification[:notification.index('(')]
+
     def send_notification(self, notification, context):
         ctx = _build_notify_context(context)
         try:
             repeat = safe_eval(notification, eval_source='<check-command>', **ctx)
         except Exception:
             # TODO Define what should happen if sending emails or sms fails.
-            self.logger.exception('Sending notification failed! alertId={} entity={}'.format(context['alert_def']['id'],
-                                                                                             context['entity']['id']))
+            self.logger.exception('Sending notification "{}" failed! alertId={} entity={}'.format(
+                self._notification_name(notification),
+                context['alert_def']['id'],
+                context['entity']['id']))
         else:
             if repeat:
                 self.con.hset('zmon:notifications:{}:{}'.format(context['alert_def']['id'], context['entity']['id']),
