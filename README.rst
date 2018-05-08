@@ -10,17 +10,18 @@ ZMON Worker
    :target: https://codecov.io/gh/zalando-zmon/zmon-worker
    :alt: Coverage Status
 
-.. image:: https://img.shields.io/pypi/dw/zmon-worker.svg
-   :target: https://pypi.python.org/pypi/zmon-worker/
-   :alt: PyPI Downloads
-
 .. image:: https://img.shields.io/pypi/v/zmon-worker.svg
    :target: https://pypi.python.org/pypi/zmon-worker/
    :alt: Latest PyPI version
 
+.. image:: https://img.shields.io/badge/OpenTracing-enabled-blue.svg
+   :target: http://opentracing.io
+   :alt: OpenTracing enabled
+
 .. image:: https://img.shields.io/pypi/l/zmon-worker.svg
    :target: https://pypi.python.org/pypi/zmon-worker/
    :alt: License
+
 
 ZMON's Python worker is doing the heavy lifting of executing tasks against entities, and evaluating all alerts assigned to check.
 Tasks are picked up from Redis and the resulting check values plus alert state changes are written back to Redis.
@@ -91,14 +92,11 @@ Alternative way of running unit tests within Docker:
     $ docker run -it -u $(id -u) -v $(pwd):/workdir -w /workdir $WORKER_IMAGE python setup.py flake8
     $ docker run -it -u $(id -u) -v $(pwd):/workdir -w /workdir $WORKER_IMAGE python setup.py test
 
-
 Building the Docker Image
 =========================
 
 .. code-block:: bash
 
-    $ sudo pip3 install -U scm-source
-    $ scm-source
     $ docker build -t zmon-worker .
     $ docker run -it zmon-worker
 

@@ -5,8 +5,12 @@ import time
 
 from mock import MagicMock
 
-from zmon_worker_monitor.zmon_worker.tasks.main import MainTask, alert_series, entity_results, entity_values
-from zmon_worker_monitor.zmon_worker.tasks.main import MAX_RESULT_KEYS, ResultSizeError
+from zmon_worker_monitor.zmon_worker.tasks.main import (
+    MainTask, alert_series, entity_results, entity_values, build_condition_context
+)
+from zmon_worker_monitor.zmon_worker.tasks.main import (
+    MAX_RESULT_KEYS, ResultSizeError, DEFAULT_CHECK_RESULTS_HISTORY_LENGTH
+)
 from zmon_worker_monitor import plugin_manager
 
 
@@ -49,6 +53,31 @@ def test_entity_results():
     con.lrange.return_value = ['{"value":7}']
     assert [{'entity_id': 'foo', 'value': 7}] == entity_results(con, 1, 2)
     assert [7] == entity_values(con, 1, 2)
+
+
+def test_timeseries():
+    reload(plugin_manager)
+    plugin_manager.init_plugin_manager()  # init plugin manager
+    plugin_manager.collect_plugins()
+
+    con = MagicMock()
+    con.lrange.return_value = [
+        '{{"ts": {}, "value": 1}}'.format(1000 + 30 * i) for i in range(DEFAULT_CHECK_RESULTS_HISTORY_LENGTH)
+    ]
+
+    ts = build_condition_context(con, 1234, 2345, {'id': 'ent-1'}, {}, {})['timeseries_sum']
+    res = ts('5m')
+    assert con.lrange.called_once()
+    assert con.lrange.called_with('zmon:checks:1234:ent-1', DEFAULT_CHECK_RESULTS_HISTORY_LENGTH)
+    assert res == 11
+
+    js = '{{"ts": {}, "value": {{"key": 1}}}}'
+    con.lrange.return_value = [
+        js.format(1000 + 30 * i) for i in range(DEFAULT_CHECK_RESULTS_HISTORY_LENGTH)
+    ]
+
+    ts = build_condition_context(con, 1234, 2345, {'id': 'ent-1'}, {}, {})['timeseries_sum']
+    assert ts('300s', key=lambda x: x['key']) == 11
 
 
 def test_alert_series():
@@ -156,7 +185,8 @@ def test_evaluate_alert(monkeypatch):
     # produce exception
     alert_def['condition'] = 'value["missing-key"] > 0'
     is_alert, captures = task.evaluate_alert(alert_def, req, result)
-    assert {'p1': 'x', 'exception': "'int' object has no attribute '__getitem__'"} == captures
+    assert 'p1' in captures and captures.get('p1') == 'x'
+    assert 'exception' in captures and "'int' object has no attribute '__getitem__'" in captures.get('exception')
     assert is_alert
 
 
@@ -205,6 +235,14 @@ def test_notify(monkeypatch):
     # alert is not in time period
     alert_def['period'] = 'year {1980}'
     result = {'ts': 10, 'value': 1}
+    notify_result = task.notify(result, req, [alert_def])
+    assert [] == notify_result
+
+    # this is the condensed version of what we saw failing:
+    alert_def['condition'] = """def alert():
+        return capture(foo=Try(lambda x: 0, 1))"""
+
+    result = {'ts': 10, 'value': 0}
     notify_result = task.notify(result, req, [alert_def])
     assert [] == notify_result
 

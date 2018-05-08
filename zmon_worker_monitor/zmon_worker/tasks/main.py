@@ -11,13 +11,12 @@ import requests
 import setproctitle
 import socket
 import sys
+import traceback
 import time
 import urllib
 from urllib3.util import parse_url
 import math
 
-import eventlog
-from zmon_worker_monitor import eventloghttp
 
 from bisect import bisect_left
 from collections import Callable, Counter
@@ -29,8 +28,13 @@ import functional
 import jsonpath_rw
 import pytz
 import tokens
-from timeperiod import in_period, InvalidFormat
+import eventlog
+import opentracing
 
+from timeperiod import in_period, InvalidFormat
+from opentracing_utils import trace, extract_span_from_kwargs
+
+from zmon_worker_monitor import eventloghttp
 from zmon_worker_monitor import plugin_manager
 from zmon_worker_monitor.redis_context_manager import RedisConnHandler
 from zmon_worker_monitor.zmon_worker.common import mathfun
@@ -103,6 +107,8 @@ EVENTS = {
     'SMS_SENT': eventlog.Event(0x34007, ['alertId', 'entity', 'phoneNumber', 'httpStatus']),
     'ACCESS_DENIED': eventlog.Event(0x34008, ['userName', 'entity']),
 }
+
+OPENTRACING_DATASERVICE_CHECK_COUNT = 'worker_dataservice_check_count'
 
 get_value = itemgetter('value')
 
@@ -344,7 +350,7 @@ def alert_series(f, n, con, check_id, entity_id):
     for v in vs:
         # counting exceptions thrown during eval as alert being active for that interval
         try:
-            v = v["value"]
+            v = v['value']
             r = 1 if f(v) else 0
             x = 0
         except Exception, e:
@@ -356,7 +362,7 @@ def alert_series(f, n, con, check_id, entity_id):
         exception_count += x
 
     if exception_count == threshold:
-        raise Exception("All alert evaluations failed! {}".format(exceptions))
+        raise Exception('All alert evaluations failed! {}'.format(exceptions))
 
     return threshold == active_count
 
@@ -598,14 +604,14 @@ class Try(Callable):
 
 
 def get_results_user(count=1, con=None, check_id=None, entity_id=None):
-    return map(lambda x: x["value"], get_results(con, check_id, entity_id, count))
+    return map(lambda x: x['value'], get_results(con, check_id, entity_id, count))
 
 
 def get_results(con, check_id, entity_id, count=1):
     r = map(json.loads, con.lrange('zmon:checks:{}:{}'.format(check_id, entity_id), 0, count - 1))
 
     for x in r:
-        x.update({"entity_id": entity_id})
+        x.update({'entity_id': entity_id})
 
     return r
 
@@ -670,26 +676,33 @@ def build_default_context():
         'Counter': Counter,
         'dict': dict,
         'divmod': divmod,
-        'Exception': Exception,
         'empty': empty,
         'enumerate': enumerate,
+        'Exception': Exception,
         'False': False,
         'filter': filter,
+        'filter_metric': check_filter_metric,
+        'filter_metrics': check_filter_metrics,
         'float': float,
         'groupby': itertools.groupby,
         'hex': hex,
         'int': int,
         'isinstance': isinstance,
         'json': json.loads,
+        'jsonpath_flat_filter': jsonpath_flat_filter,
+        'jsonpath_parse': jsonpath_rw.parse,
         'len': len,
         'list': list,
         'long': long,
         'map': map,
+        'math': math,
         'max': max,
+        'median': mathfun.median,
         'min': min,
         'normalvariate': random.normalvariate,
         'oct': oct,
         'ord': ord,
+        'percentile': mathfun.percentile,
         'pow': pow,
         'range': range,
         're': re,
@@ -709,12 +722,6 @@ def build_default_context():
         'urlparse': urlparse,
         'xrange': xrange,
         'zip': zip,
-        'jsonpath_parse': jsonpath_rw.parse,
-        'jsonpath_flat_filter': jsonpath_flat_filter,
-        'filter_metrics': check_filter_metrics,
-        'filter_metric': check_filter_metric,
-        # Include math package in context:
-        'math': math
     }
 
 
@@ -765,7 +772,7 @@ class MainTask(object):
         cls._kairosdb_host = config.get('kairosdb.host')
         cls._kairosdb_port = config.get('kairosdb.port')
         cls._zmon_url = config.get('zmon.url')
-        cls._queues = config.get('zmon.queues', "zmon:queue:default/16")
+        cls._queues = config.get('zmon.queues', 'zmon:queue:default/16')
         cls._safe_repositories = sorted(config.get('safe_repositories', []))
 
         cls._logger = cls.get_configured_logger()
@@ -786,15 +793,19 @@ class MainTask(object):
 
         if cls._dataservice_url:
             # start action loop for sending reports to dataservice
-            cls._logger.info("Enabling data service: {}".format(cls._dataservice_url))
+            cls._logger.info('Enabling data service: {}'.format(cls._dataservice_url))
             if cls._dataservice_url and cls._dataservice_oauth2:
-                cls._logger.info("Enabling OAUTH2 for data service")
+                cls._logger.info('Enabling OAUTH2 for data service')
                 tokens.configure()
                 # TODO: configure proper OAuth scopes
                 tokens.manage('uid', ['uid'], ignore_expiration=True)
                 tokens.start()
 
-            cls._dataservice_poster = PeriodicBufferedAction(cls.send_to_dataservice, retries=10, t_wait=5)
+            cls._dataservice_poster = PeriodicBufferedAction(
+                cls.send_to_dataservice,
+                retries=int(config.get('dataservice.buffer.retries', 10)),
+                t_wait=int(config.get('dataservice.buffer.delay', 5))
+            )
             cls._dataservice_poster.start()
 
         cls._metric_cache_url = config.get('metriccache.url', '')
@@ -870,6 +881,12 @@ class MainTask(object):
 
     @classmethod
     def send_to_dataservice(cls, check_results, timeout=10):
+        """
+        Report all check results back to ZMON backend (data-service)
+
+        :param check_results: List of check results.
+        :type check_results: list
+        """
 
         headers = {'Content-Type': 'application/json', 'User-Agent': get_user_agent()}
 
@@ -889,37 +906,60 @@ class MainTask(object):
             # make separate posts per check_id
             for check_id, results in results_by_id.items():
 
-                url = '{url}/api/v2/data/{account}/{check_id}/{region}'.format(url=cls._dataservice_url,
-                                                                               account=urllib.quote(account),
-                                                                               check_id=check_id,
-                                                                               region=region)
-                worker_result = {
-                    'team': team,
-                    'account': account,
-                    'region': region,
-                    'results': results,
-                }
+                # Which span to pickup from all the results?! - we start a fresh span for this check results list!
+                current_span = opentracing.tracer.start_span(operation_name='send_to_dataservice')
 
-                # we can skip this data, this problem will never fix itself
-                serialized_data = None
-                try:
-                    serialized_data = json.dumps(worker_result, cls=JsonDataEncoder)
-                except Exception as ex:
-                    logger.exception("Failed to serialize data for check {} {}: {}".format(check_id, ex, results))
+                with current_span:
 
-                if serialized_data is not None:
-                    r = requests.put(url, data=serialized_data, timeout=timeout, headers=headers)
-                    r.raise_for_status()
+                    url = '{url}/api/v2/data/{account}/{check_id}/{region}'.format(url=cls._dataservice_url,
+                                                                                   account=urllib.quote(account),
+                                                                                   check_id=check_id,
+                                                                                   region=region)
+                    worker_result = {
+                        'team': team,
+                        'account': account,
+                        'region': region,
+                        'results': results,
+                    }
+
+                    (current_span.set_tag('team', team)
+                        .set_tag('account', account)
+                        .set_tag('region', region)
+                        .set_tag('check_id', check_id))
+
+                    # we can skip this data, this problem will never fix itself
+                    serialized_data = None
+                    try:
+                        serialized_data = json.dumps(worker_result, cls=JsonDataEncoder)
+                    except Exception as ex:
+                        logger.exception('Failed to serialize data for check {} {}: {}'.format(check_id, ex, results))
+                        current_span.set_tag('skip_check_result', True)
+                        current_span.log_kv({
+                            'serialization_exception': str(ex),
+                            'check_id': str(check_id),
+                        })
+
+                    if serialized_data is not None:
+                        r = requests.put(url, data=serialized_data, timeout=timeout, headers=headers)
+                        r.raise_for_status()
         except Exception as ex:
-            logger.error("Error in data service send: url={} ex={}".format(cls._dataservice_url, ex))
+            logger.error('Error in data service send: url={} ex={}'.format(cls._dataservice_url, ex))
             raise
 
-    def check_and_notify(self, req, alerts, task_context=None):
+    @trace(pass_span=True)
+    def check_and_notify(self, req, alerts, task_context=None, **kwargs):
+        # Current OpenTracing span.
+        current_span = extract_span_from_kwargs(**kwargs)
+
         self.task_context = task_context
         start_time = time.time()
         # soft_time_limit = req['interval']
         check_id = req['check_id']
         entity_id = req['entity']['id']
+
+        current_span.set_tag('check_id', check_id)
+        current_span.set_tag('entity_id', entity_id)
+        current_span.log_kv({'alerts': [a['id'] for a in alerts]})
 
         try:
             val = self.check(req)
@@ -934,16 +974,19 @@ class MainTask(object):
         #     notify(check_and_notify, {'ts': start_time, 'td': soft_time_limit, 'value': str(e)}, req, alerts,
         #            force_alert=True)
         except CheckError, e:
-            # self.logger.warn(
-            #     'Check failed for request with id %s on entity %s. Output: %s', check_id, entity_id, str(e))
             self.notify({'ts': start_time, 'td': time.time() - start_time, 'value': str(e), 'worker': self.worker_name,
                          'exc': 1}, req, alerts,
                         force_alert=True)
         except SecurityError, e:
             self.logger.exception('Security exception in request with id %s on entity %s', check_id, entity_id)
-            self.notify({'ts': start_time, 'td': time.time() - start_time, 'value': str(e), 'worker': self.worker_name,
-                         'exc': 1}, req, alerts,
-                        force_alert=True)
+            current_span.set_tag('security_exception', True)
+            current_span.log_kv({'exception': str(e)})
+            self.notify(
+                {
+                    'ts': start_time, 'td': time.time() - start_time, 'value': str(e), 'worker': self.worker_name,
+                    'exc': 1
+                },
+                req, alerts, force_alert=True)
         except Exception, e:
             # self.logger.exception('Check request with id %s on entity %s threw an exception', check_id, entity_id)
             # PF-3685 Disconnect on unknown exceptions: we don't know what actually happened, it might be that redis
@@ -957,11 +1000,17 @@ class MainTask(object):
         else:
             self.notify(val, req, alerts)
 
-    def trial_run(self, req, alerts, task_context=None):
+    @trace(pass_span=True)
+    def trial_run(self, req, alerts, task_context=None, **kwargs):
+        # Current OpenTracing span.
+        current_span = extract_span_from_kwargs(**kwargs)
+
         self.task_context = task_context
         start_time = time.time()
         # soft_time_limit = req['interval']
         entity_id = req['entity']['id']
+
+        current_span.set_tag('entity_id', entity_id)
 
         try:
             val = self.check_for_trial_run(req)
@@ -973,7 +1022,6 @@ class MainTask(object):
         #                          force_alert=True)
         except InsufficientPermissionsError, e:
             self.logger.info('Access denied for user %s to run check on %s', req['created_by'], entity_id)
-            # eventlog.log(EVENTS['ACCESS_DENIED'].id, userName=req['created_by'], entity=entity_id)
             self.notify_for_trial_run({'ts': start_time, 'td': time.time() - start_time, 'value': str(e)}, req,
                                       alerts, force_alert=True)
         except CheckError, e:
@@ -988,6 +1036,7 @@ class MainTask(object):
         else:
             self.notify_for_trial_run(val, req, alerts)
 
+    @trace()
     def cleanup(self, *args, **kwargs):
         self.task_context = kwargs.get('task_context')
         p = self.con.pipeline()
@@ -1090,7 +1139,12 @@ class MainTask(object):
         self.con.sadd('zmon:checks', req['check_id'])
         self.con.sadd('zmon:checks:{}'.format(req['check_id']), req['entity']['id'])
         key = 'zmon:checks:{}:{}'.format(req['check_id'], req['entity']['id'])
-        value = json.dumps(result, cls=JsonDataEncoder)
+        value = 'NONE'
+        try:
+            value = json.dumps(result, cls=JsonDataEncoder)
+        except Exception, e:
+            self.logger.exception('failed to serialize check result for check %s', req['check_id'])
+            value = 'Serialization error: {}'.format(e)
         self.con.lpush(key, value)
         self.con.ltrim(key, 0, self.max_result_history_size - 1)
 
@@ -1101,7 +1155,12 @@ class MainTask(object):
                 raise ResultSizeError(
                     'Result keys count ({}) exceeded the maximum value: {}'.format(key_count, self.max_result_keys))
 
-        result_str = json.dumps(result, separators=(',', ':'), cls=JsonDataEncoder)
+        result_str = ''
+        try:
+            result_str = json.dumps(result, separators=(',', ':'), cls=JsonDataEncoder)
+        except Exception, e:
+            self.logger.exception('failed to serialize check result')
+            result_str = 'Serialization error: {}'.format(e)
 
         size = len(result_str) / 1024.0
         if size > self.max_result_size:
@@ -1109,6 +1168,7 @@ class MainTask(object):
                 'Result size ({}KB) exceeded the maximum size: {}KB'.format(
                     size, self.max_result_size))
 
+    @trace()
     def check(self, req):
 
         self.logger.debug(req)
@@ -1155,17 +1215,17 @@ class MainTask(object):
         # assume metric cache is not protected as not user exposed
         if int(req['check_id']) in self._metric_cache_check_ids:
             temp_entity = {
-                "id": req["entity"]["id"],
-                "application_id": req["entity"]["application_id"],
-                "application_version": req["entity"].get('application_version', "1")
+                'id': req['entity']['id'],
+                'application_id': req['entity']['application_id'],
+                'application_version': req['entity'].get('application_version', '1')
             }
             try:
                 requests.post(self._metric_cache_url,
-                              data=json.dumps([{"entity_id": req['entity']['id'],
-                                                "entity": temp_entity,
-                                                "check_result": res}], cls=JsonDataEncoder))
+                              data=json.dumps([{'entity_id': req['entity']['id'],
+                                                'entity': temp_entity,
+                                                'check_result': res}], cls=JsonDataEncoder))
             except Exception:
-                logger.exception("failed to write to metric cache...")
+                logger.exception('failed to write to metric cache...')
                 pass
 
         setp(req['check_id'], req['entity']['id'], 'stored')
@@ -1190,6 +1250,10 @@ class MainTask(object):
 
         except (SyntaxError, InvalidEvalExpression), e:
             raise CheckError(str(e))
+        except (SecurityError, InsufficientPermissionsError), e:
+            raise(e)
+        except Exception, e:
+            raise Exception(traceback.format_exc())
 
     def _get_check_result(self, req):
         r = self._get_check_result_internal(req)
@@ -1329,9 +1393,9 @@ class MainTask(object):
 
         if len(values) > 0:
             self.logger.debug(values)
-            serialized_values = json.dumps(values, cls=JsonDataEncoder)
 
             try:
+                serialized_values = json.dumps(values, cls=JsonDataEncoder)
                 r = requests.post('http://{}:{}/api/v1/datapoints'.format(self._kairosdb_host, self._kairosdb_port),
                                   serialized_values, timeout=2)
 
@@ -1368,7 +1432,7 @@ class MainTask(object):
                                                                                    captures,
                                                                                    alert_parameters))
         except Exception, e:
-            captures['exception'] = str(e)
+            captures['exception'] = traceback.format_exc()
             result = True
 
         try:
@@ -1394,13 +1458,15 @@ class MainTask(object):
             repeat = safe_eval(notification, eval_source='<check-command>', **ctx)
         except Exception:
             # TODO Define what should happen if sending emails or sms fails.
-            self.logger.exception('Sending notification failed!')
+            self.logger.exception('Sending notification failed! alertId={} entity={}'.format(context['alert_def']['id'],
+                                                                                             context['entity']['id']))
         else:
             if repeat:
                 self.con.hset('zmon:notifications:{}:{}'.format(context['alert_def']['id'], context['entity']['id']),
                               notification, time.time() + repeat)
 
-    def notify(self, val, req, alerts, force_alert=False):
+    @trace(pass_span=True)
+    def notify(self, val, req, alerts, force_alert=False, **kwargs):
         '''
         Process check result and evaluate all alerts. Returns list of active alert IDs
         Parameters
@@ -1419,6 +1485,8 @@ class MainTask(object):
         list
             A list of alert definitions matching given entity.
         '''
+        # OpenTracing current span!
+        current_span = extract_span_from_kwargs(**kwargs)
 
         def ts_serialize(ts):
             return datetime.fromtimestamp(ts, tz=self._timezone).isoformat(' ') if ts else None
@@ -1446,6 +1514,9 @@ class MainTask(object):
                 alerts_key = 'zmon:alerts:{}:{}'.format(alert_id, entity_id)
                 notifications_key = 'zmon:notifications:{}:{}'.format(alert_id, entity_id)
                 is_alert, captures = ((True, {}) if force_alert else self.evaluate_alert(alert, req, val))
+
+                # Timestamp of alert evaluation - useful in alerting metrics
+                alert_evaluation_ts = time.time()
 
                 alert_changed = False
                 func = getattr(self.con, ('sadd' if is_alert else 'srem'))
@@ -1483,9 +1554,16 @@ class MainTask(object):
                 # Always store captures for given alert-entity pair, this is also used a list of all entities matching
                 # given alert id. Captures are stored here because this way we can easily link them with check results
                 # (see PF-3146).
-                self.con.hset('zmon:alerts:{}:entities'.format(alert_id), entity_id, json.dumps(captures,
-                                                                                                cls=JsonDataEncoder))
+                capt_json = {}
+                try:
+                    capt_json = json.dumps(captures, cls=JsonDataEncoder)
+                except Exception, e:
+                    self.logger.exception('failed to serialize captures')
+                    captures = {'exception': str(e)}
+                    capt_json = json.dumps(captures, cls=JsonDataEncoder)
+                    # FIXME - set is_alert = True?
 
+                self.con.hset('zmon:alerts:{}:entities'.format(alert_id), entity_id, capt_json)
                 # prepare report - alert part
                 check_result['alerts'][alert_id] = {
                     'alert_id': alert_id,
@@ -1496,6 +1574,7 @@ class MainTask(object):
                     'changed': changed,
                     'in_period': is_in_period,
                     'start_time': None,
+                    'alert_evaluation_ts': alert_evaluation_ts,
                     # '_alert_stored': None,
                 }
 
@@ -1528,7 +1607,18 @@ class MainTask(object):
 
                         # create or refresh stored alert
                         alert_stored = dict(captures=captures, downtimes=downtimes, start_time=start_time, **val)
-                        self.con.set(alerts_key, json.dumps(alert_stored, cls=JsonDataEncoder))
+                        alert_json = None
+                        try:
+                            alert_json = json.dumps(alert_stored, cls=JsonDataEncoder)
+                        except Exception, e:
+                            self.logger.exception('failed to serialize alert data for alert %s', alert_id)
+                            alert_json = 'failed to serialize: {}'.format(e)
+                            if isinstance(captures, dict) and 'exception' not in captures:
+                                captures['exception'] = alert_json
+                                if not check_result['alerts'][alert_id].get('exception', False):
+                                    check_result['alerts'][alert_id]['exception'] = True
+
+                        self.con.set(alerts_key, alert_json)
                     else:
                         self.con.delete(alerts_key)
                         self.con.delete(notifications_key)
@@ -1544,24 +1634,17 @@ class MainTask(object):
                         'alert_changed': alert_changed,
                         'changed': changed,
                         'duration': timedelta(seconds=(time.time() - start_time if is_alert and not changed else 0)),
+                        'alert_evaluation_ts': alert_evaluation_ts,
                     }
 
                     # do not send notifications for downtimed alerts
                     if not downtimes:
                         if changed:
-                            if 'notifications' not in alert:
-                                alert['notifications'] = ['notify_push()']
-
-                            # do not overwrite custom push notification
-                            if not [n for n in alert['notifications'] if
-                                    n.startswith('send_push') or n.startswith('notify_push')]:
-                                alert['notifications'].append('notify_push()')
-
-                            for notification in alert['notifications']:
+                            for notification in alert.get('notifications', []):
                                 self.send_notification(notification, notification_context)
                         else:
                             previous_times = self.con.hgetall(notifications_key)
-                            for notification in alert['notifications']:
+                            for notification in alert.get('notifications', []):
                                 if notification in previous_times and time.time() > float(previous_times[notification]):
                                     self.send_notification(notification, notification_context)
 
@@ -1586,10 +1669,12 @@ class MainTask(object):
                         self.logger.info(
                             'Removed alert with id %s on entity %s from active alerts due to time period: %s',
                             alert_id, entity_id, alert.get('period', ''))
-
-                # add to alert report regardless alert up/down/out of period
-                # report['results']['alerts'][alert_id]['_alert_stored'] = alert_stored
-                # report['results']['alerts'][alert_id]['_notifications_stored'] = notifications_stored
+                        current_span.set_tag('downtime', True)
+                        current_span.log_kv({
+                            'alert_id': alert_id,
+                            'entity_id': entity_id,
+                            'time_period': alert['period'],
+                        })
 
                 check_result['alerts'][alert_id]['start_time'] = ts_serialize(
                     alert_stored['start_time']) if alert_stored else None
@@ -1600,13 +1685,13 @@ class MainTask(object):
 
             # enqueue report to be sent via http request
             if self._dataservice_poster:
-                # 'entity_id': req['entity']['id'],
-                check_result["entity"] = {"id": req['entity']['id']}
+                check_result['entity'] = {'id': req['entity']['id']}
 
                 for k in ['application_id', 'application_version', 'stack_name', 'stack_version', 'team',
-                          'account_alias', 'application', 'version', 'account_alias', 'cluster_alias', 'alias']:
-                    if k in req["entity"]:
-                        check_result["entity"][k] = req["entity"][k]
+                          'account_alias', 'application', 'version', 'account_alias', 'cluster_alias', 'alias',
+                          'spilo_role']:
+                    if k in req['entity']:
+                        check_result['entity'][k] = req['entity'][k]
 
                 # overwrite timestamp with scheduled time for datapoint alignment
                 if (isinstance(check_result['check_result']['value'], dict) and
@@ -1624,6 +1709,7 @@ class MainTask(object):
             self.con.connection_pool.disconnect()
             return None
 
+    @trace()
     def post_trial_run(self, id, entity, result):
         if self._dataservice_url is not None:
 
@@ -1633,17 +1719,18 @@ class MainTask(object):
                 'result': result
             }
 
-            headers = {"Content-Type": "application/json"}
+            headers = {'Content-Type': 'application/json'}
             if self._dataservice_oauth2:
                 headers.update({'Authorization': 'Bearer {}'.format(tokens.get('uid'))})
 
             try:
-                requests.put(self._dataservice_url + "/api/v1/data/trial-run/",
+                requests.put(self._dataservice_url + '/api/v1/data/trial-run/',
                              data=json.dumps(val, cls=JsonDataEncoder),
                              headers=headers)
             except Exception:
-                self.logger.exception("Posting trial run failed")
+                self.logger.exception('Posting trial run failed')
 
+    @trace()
     def notify_for_trial_run(self, val, req, alerts, force_alert=False):
         """Like notify(), but for trial runs!"""
 
